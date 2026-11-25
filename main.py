@@ -1,98 +1,119 @@
+import os, json, threading, time
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import os
-import json
-import threading
-import time
 import websocket
 
 app = Flask(__name__)
 CORS(app)
 
-DERIV_APP_ID = os.getenv("DERIV_APP_ID", "1089")
-DERIV_TOKEN = os.getenv("DERIV_TOKEN", "")
-WS_URL = f"wss://ws.binaryws.com/websockets/v3?app_id={DERIV_APP_ID}"
+APP_ID = os.environ.get("DERIV_APP_ID", "1089")
+TOKEN = os.environ.get("DERIV_TOKEN", "")
+
+def deriv_request(payload):
+    # One-shot Deriv WebSocket call
+    ws = websocket.create_connection(f"wss://ws.binaryws.com/websockets/v3?app_id={APP_ID}", timeout=20)
+    try:
+        if TOKEN:
+            ws.send(json.dumps({"authorize": TOKEN}))
+            auth = json.loads(ws.recv())
+            if "error" in auth:
+                return {"error": auth["error"]}
+        ws.send(json.dumps(payload))
+        res = json.loads(ws.recv())
+        return res
+    finally:
+        ws.close()
 
 @app.route("/")
 def home():
     return "Rexxie Backend is LIVE - Deriv Connected"
 
-def deriv_call(payload, timeout=15):
-    result = {}
-    done = threading.Event()
-    def on_message(ws, message):
-        data = json.loads(message)
-        result.update(data)
-        if "authorize" in data or "balance" in data or "buy" in data or "error" in data:
-            done.set()
-    def on_open(ws):
-        ws.send(json.dumps(payload))
-    ws = websocket.WebSocketApp(WS_URL, on_message=on_message, on_open=on_open)
-    t = threading.Thread(target=ws.run_forever, daemon=True)
-    t.start()
-    done.wait(timeout)
-    try:
-        ws.close()
-    except:
-        pass
-    return result
-
-@app.route("/balance", methods=["GET"])
+@app.route("/balance")
 def balance():
-    if not DERIV_TOKEN:
-        return jsonify({"error": "No DERIV_TOKEN set on Render"}), 400
-    auth = deriv_call({"authorize": DERIV_TOKEN})
-    if "error" in auth:
-        return jsonify({"error": auth["error"]}), 400
-    bal = deriv_call({"authorize": DERIV_TOKEN, "balance": 1})
-    # Second call: authorize then balance in one connection is better, so do combined
-    return jsonify(bal)
+    r = deriv_request({"balance": 1, "account": "all"})
+    if "error" in r:
+        return jsonify({"error": r["error"]}), 400
+    b = r.get("balance", {})
+    return jsonify({
+        "balance": float(b.get("balance", 0)),
+        "currency": b.get("currency", "USD"),
+        "loginid": b.get("loginid", "")
+    })
 
 @app.route("/trade", methods=["POST"])
 def trade():
-    data = request.json or {}
-    symbol = data.get("symbol", "R_100")
-    direction = data.get("direction", "CALL")
-    stake = float(data.get("stake", 1))
-    duration = int(data.get("duration", 5))
-    if not DERIV_TOKEN:
-        return jsonify({"error": "No DERIV_TOKEN set"}), 400
-    # Authorize + Buy in one flow using direct ws
-    res = {}
-    done = threading.Event()
-    def on_message(ws, message):
-        d = json.loads(message)
-        if "authorize" in d and "error" not in d:
-            ws.send(json.dumps({
-                "buy": 1,
-                "price": stake,
-                "parameters": {
-                    "amount": stake,
-                    "basis": "stake",
-                    "contract_type": direction,
-                    "currency": "USD",
-                    "duration": duration,
-                    "duration_unit": "m",
-                    "symbol": symbol
-                }
-            }))
-        if "buy" in d or ("error" in d and "authorize" not in d):
-            res.update(d)
-            done.set()
-        if "error" in d and "authorize" in d:
-            res.update(d)
-            done.set()
-    def on_open(ws):
-        ws.send(json.dumps({"authorize": DERIV_TOKEN}))
-    ws = websocket.WebSocketApp(WS_URL, on_message=on_message, on_open=on_open)
-    threading.Thread(target=ws.run_forever, daemon=True).start()
-    done.wait(20)
-    try:
-        ws.close()
-    except:
-        pass
-    return jsonify(res)
+    d = request.get_json(force=True)
+    symbol = d.get("symbol", "R_100")
+    contract = d.get("contract_type", "CALL")
+    amount = float(d.get("amount", 1))
+    duration = int(d.get("duration", 5))
+    duration_unit = d.get("duration_unit", "m")
+    basis = d.get("basis", "stake")
+    currency = d.get("currency", "USD")
+
+    # 1. Get proposal
+    prop = deriv_request({
+        "proposal": 1,
+        "amount": amount,
+        "basis": basis,
+        "contract_type": contract,
+        "currency": currency,
+        "duration": duration,
+        "duration_unit": duration_unit,
+        "symbol": symbol
+    })
+    if "error" in prop:
+        return jsonify({"error": prop["error"]}), 400
+    proposal_id = prop["proposal"]["id"]
+    # 2. Buy it
+    buy = deriv_request({"buy": proposal_id, "price": amount})
+    if "error" in buy:
+        return jsonify({"error": buy["error"]}), 400
+    c = buy.get("buy", {})
+    return jsonify({
+        "contract_id": c.get("contract_id"),
+        "longcode": c.get("longcode", ""),
+        "buy_price": c.get("buy_price"),
+        "payout": c.get("payout"),
+        "balance_after": c.get("balance_after")
+    })
+
+@app.route("/positions")
+@app.route("/portfolio")
+@app.route("/open_positions")
+def positions():
+    r = deriv_request({"portfolio": 1})
+    if "error" in r:
+        return jsonify({"error": r["error"]}), 400
+    contracts = r.get("portfolio", {}).get("contracts", [])
+    out = []
+    for c in contracts:
+        out.append({
+            "contract_id": c.get("contract_id"),
+            "symbol": c.get("symbol"),
+            "contract_type": c.get("contract_type"),
+            "buy_price": c.get("buy_price"),
+            "payout": c.get("payout"),
+            "profit": c.get("profit"),
+            "is_win": 1 if float(c.get("profit", 0) or 0) > 0 else 0
+        })
+    return jsonify({"open_positions": out, "positions": out})
+
+@app.route("/result/<contract_id>")
+def result(contract_id):
+    r = deriv_request({"proposal_open_contract": 1, "contract_id": int(contract_id)})
+    if "error" in r:
+        return jsonify({"error": r["error"]}), 400
+    c = r.get("proposal_open_contract", {})
+    profit = float(c.get("profit", 0) or 0)
+    return jsonify({
+        "contract_id": contract_id,
+        "profit": profit,
+        "is_win": 1 if profit > 0 else 0,
+        "status": c.get("status"),
+        "is_expired": c.get("is_expired", 0)
+    })
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 10000))
+    port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
