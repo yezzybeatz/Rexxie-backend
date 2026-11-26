@@ -8,7 +8,7 @@ APP_ID = os.environ.get("DERIV_APP_ID", "1089")
 TOKEN = os.environ.get("DERIV_TOKEN", "")
 def call(p):
     try:
-        ws = websocket.create_connection(f"wss://ws.derivws.com/websockets/v3?app_id={APP_ID}", timeout=15, header=["User-Agent: Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15", "Origin: https://app.deriv.com"])
+        ws = websocket.create_connection(f"wss://ws.deriv.com/websockets/v3?app_id={APP_ID}", timeout=15, header=["User-Agent: Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15", "Origin: https://app.deriv.com"])
         try:
             if TOKEN:
                 ws.send(json.dumps({"authorize": TOKEN}))
