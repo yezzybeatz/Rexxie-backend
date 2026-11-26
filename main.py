@@ -8,7 +8,7 @@ APP_ID = os.environ.get("DERIV_APP_ID", "1089")
 TOKEN = os.environ.get("DERIV_TOKEN", "")
 def call(p):
     try:
-        ws = websocket.create_connection(f"wss://ws.binaryws.com/websockets/v3?app_id={APP_ID}", timeout=15)
+        ws = websocket.create_connection(f"wss://ws.derivws.com/websockets/v3?app_id={APP_ID}", timeout=15)
         try:
             if TOKEN:
                 ws.send(json.dumps({"authorize": TOKEN}))
